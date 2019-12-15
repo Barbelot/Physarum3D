@@ -14,6 +14,6 @@ The trail volume can be displayed through volumetric rendering using the VolumeR
 
 # Acknowledgments
 
-- [Sage Jenson]([https://sagejenson.com/]) for the helpful discussion
+- [Sage Jenson](https://sagejenson.com/) for the helpful discussions
 - DenizBicer for the [2D implementation](https://github.com/DenizBicer/Physarum) in Unity
 - Scrawk for the [GPU-GEMS-3D-Fluid-Simulation](https://github.com/Scrawk/GPU-GEMS-3D-Fluid-Simulation)
