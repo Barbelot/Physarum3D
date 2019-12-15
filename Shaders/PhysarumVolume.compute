@@ -1,0 +1,297 @@
+﻿#define NUM_THREADS_1D 16
+#define NUM_THREADS_3D 8
+
+#pragma kernel InitParticles
+#pragma kernel UpdateParticles
+#pragma kernel InitTrail
+#pragma kernel UpdateTrail
+#pragma kernel UpdateParticleMap
+
+#include "Random.cginc"
+
+#define PI 3.14159265359
+#define TWOPI 6.28318530718
+
+
+struct Particle
+{
+	float3 position; 	
+	float2 angle;
+	float4 color;
+	float3 velocity;
+};
+
+
+float _AbsoluteTime;
+float3 _Size;
+float2 _SensorAngle;
+float2 _RotationAngle;
+float _SensorOffsetDistance; 
+float _StepSize;
+float _TrailDecay;
+bool _DiffuseTrail;
+float _TrailDiffuseSpeed;
+float _TrailRepulsion;
+float _RandomRotationProbability;
+float3 _DebugVector;
+
+RWStructuredBuffer<Particle> _ParticleBuffer;
+RWStructuredBuffer<float4> _TrailDensityWrite;
+StructuredBuffer<float4> _TrailDensityRead;
+
+RWTexture2D<float4> _ParticlePositionMap;
+RWTexture2D<float4> _ParticleColorMap;
+RWTexture2D<float4> _ParticleVelocityMap;
+
+float2 _ParticlePositionMapSize;
+
+/******************
+FUNCTIONS
+******************/
+
+//Return 1 if v inside the sphere, 0 otherwise
+float InsideSphere(float3 v, float3 center, float radius)
+{
+	float3 position = v - center;
+	return (step(radius, length(position)) + 1.0) % 2.0;
+}
+
+float4 SampleDensityFromPosition(float3 pos) {
+
+	//Point filtering
+	//return _TrailDensityWrite[(int)pos.x + (int)pos.y * _Size.x + (int)pos.z * _Size.x * _Size.y];
+
+	//Bilinear filtering
+	int x = pos.x;
+	int y = pos.y;
+	int z = pos.z;
+
+	int X = _Size.x;
+	int XY = _Size.x * _Size.y;
+
+	float fx = pos.x - x;
+	float fy = pos.y - y;
+	float fz = pos.z - z;
+
+	int xp1 = min(_Size.x - 1, x + 1);
+	int yp1 = min(_Size.y - 1, y + 1);
+	int zp1 = min(_Size.z - 1, z + 1);
+
+	float4 x0 = _TrailDensityWrite[x + y * X + z * XY] * (1.0f - fx) + _TrailDensityWrite[xp1 + y * X + z * XY] * fx;
+	float4 x1 = _TrailDensityWrite[x + y * X + zp1 * XY] * (1.0f - fx) + _TrailDensityWrite[xp1 + y * X + zp1 * XY] * fx;
+
+	float4 x2 = _TrailDensityWrite[x + yp1 * X + z * XY] * (1.0f - fx) + _TrailDensityWrite[xp1 + yp1 * X + z * XY] * fx;
+	float4 x3 = _TrailDensityWrite[x + yp1 * X + zp1 * XY] * (1.0f - fx) + _TrailDensityWrite[xp1 + yp1 * X + zp1 * XY] * fx;
+
+	float4 z0 = x0 * (1.0f - fz) + x1 * fz;
+	float4 z1 = x2 * (1.0f - fz) + x3 * fz;
+
+	return z0 * (1.0f - fy) + z1 * fy;
+
+}
+
+void WriteDensityFromPosition(float3 pos, float4 value) {
+
+	_TrailDensityWrite[(int)(pos.x) + (int)(pos.y) * (_Size.x) + (int)(pos.z) * (_Size.x) * (_Size.y)] = value;
+}
+
+/******************
+KERNELS
+******************/
+
+[numthreads(NUM_THREADS_1D,1,1)]
+void InitParticles(uint3 id: SV_DISPATCHTHREADID)
+{
+
+	//Initialize position
+	//float x = Random(id.x * 48856) * _Size.x * 0.5f + _Size.x * 0.25f;
+	//float y = Random(id.x * 12377) * _Size.y * 0.5f + _Size.y * 0.25f;
+	//float z = Random(id.x * 67563) * _Size.z * 0.5f + _Size.z * 0.25f;
+
+	//float3 pos = float3(x, y, z);
+	float3 pos = RandomPointInSphere(id.x) * _Size * 0.05f + _Size * 0.5f;
+
+	float4 color = float4(1, 1, 1, 1);
+
+	//float2 rotationToCenter = DirectTo(pos, _Size * 0.5f);
+	float2 randomRotation = float2(Random(id.x) * TWOPI, Random(id.x + 1) * TWOPI);
+
+	_ParticleBuffer[id.x].position = pos;
+	_ParticleBuffer[id.x].color = color;
+	_ParticleBuffer[id.x].angle = randomRotation;
+}
+
+[numthreads(NUM_THREADS_1D,1,1)]
+void UpdateParticles (uint3 id: SV_DISPATCHTHREADID)
+{
+	float3 pos = _ParticleBuffer[id.x].position;
+	float4 color = _ParticleBuffer[id.x].color;
+	float2 angle = _ParticleBuffer[id.x].angle;
+
+	//Read trail
+	float leftAngle = angle.x + _SensorAngle.x;
+	float rightAngle = angle.x - _SensorAngle.x;
+	float topAngle = angle.y + _SensorAngle.y;
+	float downAngle = angle.y - _SensorAngle.y;
+
+	//3D
+	float3 frontPos =		pos + float3(cos(angle.y) * cos(angle.x), sin(angle.y) * cos(angle.x), sin(angle.x)) * _SensorOffsetDistance;
+	float3 frontLeftPos =	pos + float3(cos(angle.y) * cos(leftAngle), sin(angle.y) * cos(leftAngle), sin(leftAngle)) * _SensorOffsetDistance;
+	float3 frontRightPos =	pos + float3(cos(angle.y) * cos(rightAngle), sin(angle.y) * cos(rightAngle), sin(rightAngle)) * _SensorOffsetDistance;
+	float3 frontTop =		pos + float3(cos(topAngle) * cos(angle.x), sin(topAngle) * cos(angle.x), sin(angle.x)) * _SensorOffsetDistance;
+	float3 frontDown =		pos + float3(cos(downAngle) * cos(angle.x), sin(downAngle) * cos(angle.x), sin(angle.x)) * _SensorOffsetDistance;
+	//float3 frontTopLeftPos = pos + float3(cos(topAngle) * cos(leftAngle), sin(topAngle) * cos(leftAngle), sin(leftAngle)) * _SensorOffsetDistance;
+	//float3 frontTopRightPos = pos + float3(cos(topAngle) * cos(rightAngle), sin(topAngle) * cos(rightAngle), sin(rightAngle)) * _SensorOffsetDistance;
+	//float3 frontDownLeftPos = pos + float3(cos(downAngle) * cos(leftAngle), sin(downAngle) * cos(leftAngle), sin(leftAngle)) * _SensorOffsetDistance;
+	//float3 frontDownRight = pos + float3(cos(downAngle) * cos(rightAngle), sin(downAngle) * cos(rightAngle), sin(rightAngle)) * _SensorOffsetDistance;
+
+	float F = SampleDensityFromPosition(frontPos).w;
+	float FL = SampleDensityFromPosition(frontLeftPos).w;
+	float FR = SampleDensityFromPosition(frontRightPos).w;
+	float FT = SampleDensityFromPosition(frontTop).w;
+	float FD = SampleDensityFromPosition(frontDown).w;
+	//float FTL = SampleDensityFromPosition(frontTopLeftPos).w;
+	//float FTR = SampleDensityFromPosition(frontTopRightPos).w;
+	//float FDL = SampleDensityFromPosition(frontDownLeftPos).w;
+	//float FDR = SampleDensityFromPosition(frontDownRight).w;
+
+	//Get new position
+	if (Random(id.x * 456 + _AbsoluteTime) < _RandomRotationProbability) {
+		//RandomRotation
+		angle.x += _RotationAngle.x * RandomSign(id.x + _AbsoluteTime);
+		angle.y += _RotationAngle.y * RandomSign(id.x + 254 + _AbsoluteTime);
+	}
+	else {
+
+		int maxIndex = 0;
+		float maxValue = F;
+		float trailThreshold = 1. - _TrailRepulsion;
+
+		if (FL > maxValue && FL < trailThreshold) { maxIndex = 1; maxValue = FL; }
+		if (FR > maxValue && FR < trailThreshold) { maxIndex = 2; maxValue = FR; }
+		if (FT > maxValue && FT < trailThreshold) { maxIndex = 3; maxValue = FT; }
+		if (FD > maxValue && FD < trailThreshold) { maxIndex = 4; maxValue = FD; }
+		//if (FTL > maxValue && FTL < trailThreshold) { maxIndex = 5; maxValue = FTL; }
+		//if (FTR > maxValue && FTR < trailThreshold) { maxIndex = 6; maxValue = FTR; }
+		//if (FDL > maxValue && FDL < trailThreshold) { maxIndex = 7; maxValue = FDL; }
+		//if (FDR > maxValue && FDR < trailThreshold) { maxIndex = 8; maxValue = FDR; }
+
+		if (maxIndex == 0 && F >= trailThreshold) {
+			angle.x += _RotationAngle.x * RandomSign(id.x + _AbsoluteTime);
+			angle.y += _RotationAngle.y * RandomSign(id.x + 254 + _AbsoluteTime);
+		}
+		if (maxIndex == 1) { angle.x += _RotationAngle.x; }
+		if (maxIndex == 2) { angle.x -= _RotationAngle.x; }
+		if (maxIndex == 3) { angle.y += _RotationAngle.y; }
+		if (maxIndex == 4) { angle.y -= _RotationAngle.y; }
+		//if (maxIndex == 5) { angle.x += _RotationAngle.x; angle.y += _RotationAngle.y; }
+		//if (maxIndex == 6) { angle.x -= _RotationAngle.x; angle.y += _RotationAngle.y; }
+		//if (maxIndex == 7) { angle.x += _RotationAngle.x; angle.y -= _RotationAngle.y; }
+		//if (maxIndex == 8) { angle.x -= _RotationAngle.x; angle.y -= _RotationAngle.y; }
+
+	}
+
+	float3 newPos = pos + float3(cos(angle.y) * cos(angle.x), sin(angle.y) * cos(angle.x), sin(angle.x)) * _StepSize;
+
+	//Check boundaries
+	//3D Cube
+	//if (newPos.x > _Size.x - 1) { newPos.x = 0; }
+	//if (newPos.y > _Size.y - 1) { newPos.y = 0; }
+	//if (newPos.z > _Size.z - 1) { newPos.z = 0; }
+	//if (newPos.x < 0) { newPos.x = _Size.x - 1; }
+	//if (newPos.y < 0) { newPos.y = _Size.y - 1; }
+	//if (newPos.z < 0) { newPos.z = _Size.z - 1; }
+
+	//3D Sphere
+	float inside = InsideSphere(newPos, _Size * 0.5f, _Size.x * 0.5f);
+	//RandomRotation
+	angle.x += (_RotationAngle.x * RandomSign(id.x + _AbsoluteTime)) * (1 - inside);
+	angle.y += (_RotationAngle.y * RandomSign(id.x + 254 + _AbsoluteTime)) * (1 - inside);
+
+	newPos = newPos * inside + pos * (1 - inside);
+
+	//Move particule
+	_ParticleBuffer[id.x].velocity = newPos - pos;
+	_ParticleBuffer[id.x].position = float3(newPos.x, newPos.y, newPos.z);
+	_ParticleBuffer[id.x].angle = angle;
+	_ParticleBuffer[id.x].color = color;
+
+	//Update trail
+	WriteDensityFromPosition(newPos, min(SampleDensityFromPosition(newPos) + _ParticleBuffer[id.x].color, 1));
+
+}
+
+[numthreads(NUM_THREADS_3D, NUM_THREADS_3D, NUM_THREADS_3D)]
+void InitTrail(uint3 id : SV_DISPATCHTHREADID)
+{
+	int idx = id.x + id.y * _Size.x + id.z * _Size.x * _Size.y;
+
+	_TrailDensityWrite[idx] = float4(0,0,0,0);
+}
+
+[numthreads(NUM_THREADS_3D, NUM_THREADS_3D, NUM_THREADS_3D)]
+void UpdateTrail (uint3 id : SV_DISPATCHTHREADID)
+{
+	int _SizeXY = _Size.x * _Size.y;
+
+	int idx = id.x + id.y * _Size.x + id.z * _SizeXY;
+
+	float4 value = float4(0, 0, 0, 0);
+
+	value += _TrailDensityRead[idx]; //  0, 0, 0
+
+	//Mean filter
+
+	if (_DiffuseTrail) {
+
+		//3D
+		value += _TrailDensityRead[max(0, id.x - 1) + max(0, id.y - 1) * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; // -1,-1,-1
+		value += _TrailDensityRead[max(0, id.x - 1) + max(0, id.y - 1) * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; // -1,-1, 0
+		value += _TrailDensityRead[max(0, id.x - 1) + max(0, id.y - 1) * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; // -1,-1,+1
+		value += _TrailDensityRead[max(0, id.x - 1) + id.y * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; // -1, 0,-1
+		value += _TrailDensityRead[max(0, id.x - 1) + id.y * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; // -1, 0, 0
+		value += _TrailDensityRead[max(0, id.x - 1) + id.y * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; // -1, 0,+1
+		value += _TrailDensityRead[max(0, id.x - 1) + min(_Size.y - 1, id.y + 1) * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; // -1,+1,-1
+		value += _TrailDensityRead[max(0, id.x - 1) + min(_Size.y - 1, id.y + 1) * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; // -1,+1, 0
+		value += _TrailDensityRead[max(0, id.x - 1) + min(_Size.y - 1, id.y + 1) * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; // -1,+1,+1
+
+		value += _TrailDensityRead[id.x + max(0, id.y - 1) * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; //  0,-1,-1
+		value += _TrailDensityRead[id.x + max(0, id.y - 1) * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; //  0,-1, 0
+		value += _TrailDensityRead[id.x + max(0, id.y - 1) * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; //  0,-1,+1
+		value += _TrailDensityRead[id.x + id.y * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; //  0, 0,-1
+		value += _TrailDensityRead[id.x + id.y * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; //  0, 0,+1
+		value += _TrailDensityRead[id.x + min(_Size.y - 1, id.y + 1) * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; //  0,+1,-1
+		value += _TrailDensityRead[id.x + min(_Size.y - 1, id.y + 1) * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; //  0,+1, 0
+		value += _TrailDensityRead[id.x + min(_Size.y - 1, id.y + 1) * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; //  0,+1,+1
+
+		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + max(0, id.y - 1) * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; // +1,-1,-1
+		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + max(0, id.y - 1) * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; // +1,-1, 0
+		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + max(0, id.y - 1) * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; // +1,-1,+1
+		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + id.y * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; // +1, 0,-1
+		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + id.y * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; // +1, 0, 0
+		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + id.y * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; // +1, 0,+1
+		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + min(_Size.y - 1, id.y + 1) * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; // +1,+1,-1
+		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + min(_Size.y - 1, id.y + 1) * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; // +1,+1, 0
+		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + min(_Size.y - 1, id.y + 1) * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; // +1,+1,+1
+
+		value = (value / (1. + 26.*_TrailDiffuseSpeed));
+	}
+
+	value *= 1.0f - _TrailDecay;
+
+	_TrailDensityWrite[idx] = value;
+
+}
+
+[numthreads(NUM_THREADS_1D, 1, 1)]
+void UpdateParticleMap(uint3 id : SV_DISPATCHTHREADID)
+{
+	uint2 mapCoord = uint2(id.x % _ParticlePositionMapSize.x, id.x / _ParticlePositionMapSize.x);
+
+	float3 particlePos = _ParticleBuffer[id.x].position;
+
+	_ParticlePositionMap[mapCoord] = float4(particlePos.x / _Size.x, particlePos.y / _Size.y, particlePos.z / _Size.z, 1);
+	_ParticleColorMap[mapCoord] = _ParticleBuffer[id.x].color;
+	_ParticleVelocityMap[mapCoord] = float4(_ParticleBuffer[id.x].velocity, 1);
+}
+
