@@ -9,7 +9,8 @@ Unity implementation of the [Physarum Transport Network](https://www.mitpressjou
 - Download this repo or clone it inside a folder in your Unity project.
 - Add the PhysarumVolumeController.cs script to an object in your scene.
 - Assign the PhysarumVolume compute shader and particle position/color/velocity textures to the PhysarumVolumeController script.
-- Create a VFX Graph and with the SetPositionFromMap and SetColorFromMap blocks in the Update context (set the sampling mode to Sequential)
+- Create a VFX Graph and with the SetPositionFromMap and SetColorFromMap blocks in the Update context.
+- Set ParticlePositionMap and ParticleColorMap in those blocks and switch their sampling mode to Sequential.
 
 # Technical Details
 
