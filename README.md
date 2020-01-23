@@ -4,6 +4,8 @@ Unity implementation of the [Physarum Transport Network](https://www.mitpressjou
 
 [Result Video](https://vimeo.com/379589358)
 
+![Result Image](https://benoitarbelot.files.wordpress.com/2020/01/physarum3d.png)
+
 # Setup
 
 - Download this repo or clone it inside a folder in your Unity project.
