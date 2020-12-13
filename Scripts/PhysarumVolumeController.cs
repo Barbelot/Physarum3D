@@ -14,8 +14,10 @@ public class PhysarumVolumeController : MonoBehaviour
 	[SerializeField] public RenderTexture particlePositionMap;
 	[SerializeField] public RenderTexture particleColorMap;
 	[SerializeField] public RenderTexture particleVelocityMap;
+	//[SerializeField] public MeshToSDF meshToSDF;
 
 	[Header("Runtime Parameters")]
+	public float updatesPerSecond = 60;
     [Range(0f, 1f)] public float trailDecay = 0.002f;
     public Vector2 sensorAngleDegrees = Vector2.one * 45f; 	//in degrees
     public Vector2 rotationAngleDegrees = Vector2.one * 45f;//in degrees
@@ -25,6 +27,8 @@ public class PhysarumVolumeController : MonoBehaviour
 	public bool diffuseTrail = true;
 	[Range(0f, 1f)] public float trailDiffuseSpeed = 1;
 	[Range(0f, 1f)] public float trailRepulsion = 0;
+	[Range(0f, 1f)] public float meshImportance = 1;
+	public float trailToSizeImportance = 1;
 
 	[Header("Debug")]
 	public bool reinitialize = false;
@@ -41,7 +45,7 @@ public class PhysarumVolumeController : MonoBehaviour
 	private RenderTexture _tmpParticleVelocityMap;
 
     private static int groupCount3D = 8;       // Group size has to be same with the compute shader group size
-	private static int groupCount1D = 16;
+	private static int groupCount1D = 1024;
 
     struct Particle
     {
@@ -49,13 +53,15 @@ public class PhysarumVolumeController : MonoBehaviour
 		public Vector2 angle;
 		public Vector4 color;
 		public Vector3 velocity;
+		public float size;
 
-		public Particle(Vector3 position, Vector2 angle, Vector4 color, Vector3 velocity)
+		public Particle(Vector3 position, Vector2 angle, Vector4 color, Vector3 velocity, float size)
         {
             this.position = position;
 			this.angle = angle;
 			this.color = color;
 			this.velocity = velocity;
+			this.size = size;
         }
     };
 
@@ -86,10 +92,14 @@ public class PhysarumVolumeController : MonoBehaviour
 			reinitialize = false;
 		}
 
-		UpdateRuntimeParameters();
-		UpdateParticles();
-		UpdateTrail();
-		UpdateParticleMap();
+		int nbOfUpdatesNeeded = Mathf.CeilToInt(Time.deltaTime * updatesPerSecond);
+
+		for (int i = 0; i < nbOfUpdatesNeeded; i++) {
+			UpdateRuntimeParameters();
+			UpdateParticles();
+			UpdateTrail();
+			UpdateParticleMap();
+		}
 	}
 
 	void OnDestroy() {
@@ -115,7 +125,7 @@ public class PhysarumVolumeController : MonoBehaviour
         if (numberOfParticles < groupCount1D) numberOfParticles = groupCount1D;
 
         Particle[] particleArray = new Particle[numberOfParticles];
-        particleBuffer = new ComputeBuffer(particleArray.Length, 12*sizeof(float));
+        particleBuffer = new ComputeBuffer(particleArray.Length, 13*sizeof(float));
         particleBuffer.SetData(particleArray);
 
         //initialize particles with random positions
@@ -201,6 +211,8 @@ public class PhysarumVolumeController : MonoBehaviour
 		shader.SetFloat("_TrailDiffuseSpeed", trailDiffuseSpeed);
 		shader.SetFloat("_TrailRepulsion", trailRepulsion);
 		shader.SetFloat("_RandomRotationProbability", randomRotationProbability);
+		shader.SetFloat("_TrailToSizeImportance", trailToSizeImportance);
+		
 	}
 
     void UpdateParticles()
@@ -216,6 +228,11 @@ public class PhysarumVolumeController : MonoBehaviour
 
 		shader.SetBuffer(updateTrailKernel, "_TrailDensityRead", trailDensityBuffer[READ]);
 		shader.SetBuffer(updateTrailKernel, "_TrailDensityWrite", trailDensityBuffer[WRITE]);
+
+		//SDF
+		//shader.SetTexture(updateTrailKernel, "_MeshVoxels", meshToSDF.outputRenderTexture);
+		//shader.SetInt("_MeshSDFResolution", meshToSDF.sdfResolution);
+		//shader.SetFloat("_MeshImportance", meshImportance);
 
 		shader.Dispatch(updateTrailKernel, (int)size.x / groupCount3D, (int)size.y / groupCount3D, (int)size.z / groupCount3D);
 	}

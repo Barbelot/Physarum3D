@@ -1,4 +1,4 @@
-﻿#define NUM_THREADS_1D 16
+﻿#define NUM_THREADS_1D 1024
 #define NUM_THREADS_3D 8
 
 #pragma kernel InitParticles
@@ -19,8 +19,8 @@ struct Particle
 	float2 angle;
 	float4 color;
 	float3 velocity;
+	float size;
 };
-
 
 float _AbsoluteTime;
 float3 _Size;
@@ -34,6 +34,7 @@ float _TrailDiffuseSpeed;
 float _TrailRepulsion;
 float _RandomRotationProbability;
 float3 _DebugVector;
+float _TrailToSizeImportance;
 
 RWStructuredBuffer<Particle> _ParticleBuffer;
 RWStructuredBuffer<float4> _TrailDensityWrite;
@@ -44,6 +45,10 @@ RWTexture2D<float4> _ParticleColorMap;
 RWTexture2D<float4> _ParticleVelocityMap;
 
 float2 _ParticlePositionMapSize;
+
+//RWTexture3D<half4> _MeshVoxels;
+//float _MeshImportance;
+//int _MeshSDFResolution;
 
 /******************
 FUNCTIONS
@@ -119,6 +124,7 @@ void InitParticles(uint3 id: SV_DISPATCHTHREADID)
 	_ParticleBuffer[id.x].position = pos;
 	_ParticleBuffer[id.x].color = color;
 	_ParticleBuffer[id.x].angle = randomRotation;
+	_ParticleBuffer[id.x].size = 1.0f;
 }
 
 [numthreads(NUM_THREADS_1D,1,1)]
@@ -127,6 +133,8 @@ void UpdateParticles (uint3 id: SV_DISPATCHTHREADID)
 	float3 pos = _ParticleBuffer[id.x].position;
 	float4 color = _ParticleBuffer[id.x].color;
 	float2 angle = _ParticleBuffer[id.x].angle;
+
+	float trailValue = 0;
 
 	//Read trail
 	float leftAngle = angle.x + _SensorAngle.x;
@@ -189,6 +197,7 @@ void UpdateParticles (uint3 id: SV_DISPATCHTHREADID)
 		//if (maxIndex == 7) { angle.x += _RotationAngle.x; angle.y -= _RotationAngle.y; }
 		//if (maxIndex == 8) { angle.x -= _RotationAngle.x; angle.y -= _RotationAngle.y; }
 
+		trailValue = maxValue;
 	}
 
 	float3 newPos = pos + float3(cos(angle.y) * cos(angle.x), sin(angle.y) * cos(angle.x), sin(angle.x)) * _StepSize;
@@ -215,6 +224,7 @@ void UpdateParticles (uint3 id: SV_DISPATCHTHREADID)
 	_ParticleBuffer[id.x].position = float3(newPos.x, newPos.y, newPos.z);
 	_ParticleBuffer[id.x].angle = angle;
 	_ParticleBuffer[id.x].color = color;
+	_ParticleBuffer[id.x].size = trailValue * _TrailToSizeImportance;
 
 	//Update trail
 	WriteDensityFromPosition(newPos, min(SampleDensityFromPosition(newPos) + _ParticleBuffer[id.x].color, 1));
@@ -279,6 +289,13 @@ void UpdateTrail (uint3 id : SV_DISPATCHTHREADID)
 
 	value *= 1.0f - _TrailDecay;
 
+	//Add mesh sdf
+	//float meshDist = _MeshVoxels[uint3(((float)id.x * (float)_MeshSDFResolution / (float)_Size.x),
+	//	((float)id.y * (float)_MeshSDFResolution / (float)_Size.y),
+	//	((float)id.z * (float)_MeshSDFResolution / (float)_Size.z))].x;
+
+	//value.w = lerp(value.w, 1.0f - meshDist, _MeshImportance);
+
 	_TrailDensityWrite[idx] = value;
 
 }
@@ -290,7 +307,7 @@ void UpdateParticleMap(uint3 id : SV_DISPATCHTHREADID)
 
 	float3 particlePos = _ParticleBuffer[id.x].position;
 
-	_ParticlePositionMap[mapCoord] = float4(particlePos.x / _Size.x, particlePos.y / _Size.y, particlePos.z / _Size.z, 1);
+	_ParticlePositionMap[mapCoord] = float4(particlePos.x / _Size.x, particlePos.y / _Size.y, particlePos.z / _Size.z, _ParticleBuffer[id.x].size);
 	_ParticleColorMap[mapCoord] = _ParticleBuffer[id.x].color;
 	_ParticleVelocityMap[mapCoord] = float4(_ParticleBuffer[id.x].velocity, 1);
 }
