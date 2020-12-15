@@ -45,7 +45,7 @@ public class PhysarumVolumeController : MonoBehaviour
 	private RenderTexture _tmpParticleVelocityMap;
 
     private static int groupCount3D = 8;       // Group size has to be same with the compute shader group size
-	private static int groupCount1D = 1024;
+	private static int groupCount1D = 512;
 
     struct Particle
     {
@@ -217,6 +217,9 @@ public class PhysarumVolumeController : MonoBehaviour
 
     void UpdateParticles()
     {
+		SwapBuffers(trailDensityBuffer);
+
+		shader.SetBuffer(updateParticlesKernel, "_TrailDensityRead", trailDensityBuffer[READ]);
 		shader.SetBuffer(updateParticlesKernel, "_TrailDensityWrite", trailDensityBuffer[WRITE]);
 
 		shader.Dispatch(updateParticlesKernel, numberOfParticles / groupCount1D, 1, 1);

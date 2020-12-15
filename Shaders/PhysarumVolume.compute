@@ -1,4 +1,4 @@
-﻿#define NUM_THREADS_1D 1024
+﻿#define NUM_THREADS_1D 512
 #define NUM_THREADS_3D 8
 
 #pragma kernel InitParticles
@@ -64,7 +64,7 @@ float InsideSphere(float3 v, float3 center, float radius)
 float4 SampleDensityFromPosition(float3 pos) {
 
 	//Point filtering
-	//return _TrailDensityWrite[(int)pos.x + (int)pos.y * _Size.x + (int)pos.z * _Size.x * _Size.y];
+	return _TrailDensityRead[(int)pos.x + (int)pos.y * _Size.x + (int)pos.z * _Size.x * _Size.y];
 
 	//Bilinear filtering
 	int x = pos.x;
@@ -82,11 +82,11 @@ float4 SampleDensityFromPosition(float3 pos) {
 	int yp1 = min(_Size.y - 1, y + 1);
 	int zp1 = min(_Size.z - 1, z + 1);
 
-	float4 x0 = _TrailDensityWrite[x + y * X + z * XY] * (1.0f - fx) + _TrailDensityWrite[xp1 + y * X + z * XY] * fx;
-	float4 x1 = _TrailDensityWrite[x + y * X + zp1 * XY] * (1.0f - fx) + _TrailDensityWrite[xp1 + y * X + zp1 * XY] * fx;
+	float4 x0 = _TrailDensityRead[x + y * X + z   * XY] * (1.0f - fx) + _TrailDensityRead[xp1 + y * X + z   * XY] * fx;
+	float4 x1 = _TrailDensityRead[x + y * X + zp1 * XY] * (1.0f - fx) + _TrailDensityRead[xp1 + y * X + zp1 * XY] * fx;
 
-	float4 x2 = _TrailDensityWrite[x + yp1 * X + z * XY] * (1.0f - fx) + _TrailDensityWrite[xp1 + yp1 * X + z * XY] * fx;
-	float4 x3 = _TrailDensityWrite[x + yp1 * X + zp1 * XY] * (1.0f - fx) + _TrailDensityWrite[xp1 + yp1 * X + zp1 * XY] * fx;
+	float4 x2 = _TrailDensityRead[x + yp1 * X + z   * XY] * (1.0f - fx) + _TrailDensityRead[xp1 + yp1 * X + z   * XY] * fx;
+	float4 x3 = _TrailDensityRead[x + yp1 * X + zp1 * XY] * (1.0f - fx) + _TrailDensityRead[xp1 + yp1 * X + zp1 * XY] * fx;
 
 	float4 z0 = x0 * (1.0f - fz) + x1 * fz;
 	float4 z1 = x2 * (1.0f - fz) + x3 * fz;
@@ -130,6 +130,7 @@ void InitParticles(uint3 id: SV_DISPATCHTHREADID)
 [numthreads(NUM_THREADS_1D,1,1)]
 void UpdateParticles (uint3 id: SV_DISPATCHTHREADID)
 {
+	
 	float3 pos = _ParticleBuffer[id.x].position;
 	float4 color = _ParticleBuffer[id.x].color;
 	float2 angle = _ParticleBuffer[id.x].angle;
@@ -203,6 +204,7 @@ void UpdateParticles (uint3 id: SV_DISPATCHTHREADID)
 	float3 newPos = pos + float3(cos(angle.y) * cos(angle.x), sin(angle.y) * cos(angle.x), sin(angle.x)) * _StepSize;
 
 	//Check boundaries
+
 	//3D Cube
 	//if (newPos.x > _Size.x - 1) { newPos.x = 0; }
 	//if (newPos.y > _Size.y - 1) { newPos.y = 0; }
@@ -221,14 +223,13 @@ void UpdateParticles (uint3 id: SV_DISPATCHTHREADID)
 
 	//Move particule
 	_ParticleBuffer[id.x].velocity = newPos - pos;
-	_ParticleBuffer[id.x].position = float3(newPos.x, newPos.y, newPos.z);
+	_ParticleBuffer[id.x].position = newPos;
 	_ParticleBuffer[id.x].angle = angle;
 	_ParticleBuffer[id.x].color = color;
 	_ParticleBuffer[id.x].size = trailValue * _TrailToSizeImportance;
 
 	//Update trail
 	WriteDensityFromPosition(newPos, min(SampleDensityFromPosition(newPos) + _ParticleBuffer[id.x].color, 1));
-
 }
 
 [numthreads(NUM_THREADS_3D, NUM_THREADS_3D, NUM_THREADS_3D)]
