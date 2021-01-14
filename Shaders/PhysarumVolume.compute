@@ -5,6 +5,10 @@
 #pragma kernel UpdateParticles
 #pragma kernel InitTrail
 #pragma kernel UpdateTrail
+#pragma kernel BlurTrailX
+#pragma kernel BlurTrailY
+#pragma kernel BlurTrailZ
+#pragma kernel DecayTrail
 #pragma kernel UpdateParticleMap
 
 #include "Random.cginc"
@@ -37,12 +41,14 @@ float3 _DebugVector;
 float _TrailToSizeImportance;
 
 RWStructuredBuffer<Particle> _ParticleBuffer;
-RWStructuredBuffer<float4> _TrailDensityWrite;
-StructuredBuffer<float4> _TrailDensityRead;
+RWTexture3D<float4> _TrailDensityWrite;
+Texture3D<float4> _TrailDensityRead;
 
 RWTexture2D<float4> _ParticlePositionMap;
 RWTexture2D<float4> _ParticleColorMap;
 RWTexture2D<float4> _ParticleVelocityMap;
+
+SamplerState linearClampSampler;
 
 float2 _ParticlePositionMapSize;
 
@@ -63,41 +69,12 @@ float InsideSphere(float3 v, float3 center, float radius)
 
 float4 SampleDensityFromPosition(float3 pos) {
 
-	//Point filtering
-	return _TrailDensityRead[(int)pos.x + (int)pos.y * _Size.x + (int)pos.z * _Size.x * _Size.y];
-
-	//Bilinear filtering
-	int x = pos.x;
-	int y = pos.y;
-	int z = pos.z;
-
-	int X = _Size.x;
-	int XY = _Size.x * _Size.y;
-
-	float fx = pos.x - x;
-	float fy = pos.y - y;
-	float fz = pos.z - z;
-
-	int xp1 = min(_Size.x - 1, x + 1);
-	int yp1 = min(_Size.y - 1, y + 1);
-	int zp1 = min(_Size.z - 1, z + 1);
-
-	float4 x0 = _TrailDensityRead[x + y * X + z   * XY] * (1.0f - fx) + _TrailDensityRead[xp1 + y * X + z   * XY] * fx;
-	float4 x1 = _TrailDensityRead[x + y * X + zp1 * XY] * (1.0f - fx) + _TrailDensityRead[xp1 + y * X + zp1 * XY] * fx;
-
-	float4 x2 = _TrailDensityRead[x + yp1 * X + z   * XY] * (1.0f - fx) + _TrailDensityRead[xp1 + yp1 * X + z   * XY] * fx;
-	float4 x3 = _TrailDensityRead[x + yp1 * X + zp1 * XY] * (1.0f - fx) + _TrailDensityRead[xp1 + yp1 * X + zp1 * XY] * fx;
-
-	float4 z0 = x0 * (1.0f - fz) + x1 * fz;
-	float4 z1 = x2 * (1.0f - fz) + x3 * fz;
-
-	return z0 * (1.0f - fy) + z1 * fy;
-
+	return _TrailDensityRead.SampleLevel(linearClampSampler, pos, 0);
 }
 
 void WriteDensityFromPosition(float3 pos, float4 value) {
 
-	_TrailDensityWrite[(int)(pos.x) + (int)(pos.y) * (_Size.x) + (int)(pos.z) * (_Size.x) * (_Size.y)] = value;
+	_TrailDensityWrite[uint3(pos * _Size - float3(0.5, 0.5, 0.5))] = value;
 }
 
 /******************
@@ -235,55 +212,50 @@ void UpdateParticles (uint3 id: SV_DISPATCHTHREADID)
 [numthreads(NUM_THREADS_3D, NUM_THREADS_3D, NUM_THREADS_3D)]
 void InitTrail(uint3 id : SV_DISPATCHTHREADID)
 {
-	int idx = id.x + id.y * _Size.x + id.z * _Size.x * _Size.y;
-
-	_TrailDensityWrite[idx] = float4(0,0,0,0);
+	_TrailDensityWrite[id] = float4(0,0,0,0);
 }
 
 [numthreads(NUM_THREADS_3D, NUM_THREADS_3D, NUM_THREADS_3D)]
 void UpdateTrail (uint3 id : SV_DISPATCHTHREADID)
 {
-	int _SizeXY = _Size.x * _Size.y;
+	float3 uv = (id + float3(0.5, 0.5, 0.5)) / _Size;
+	float4 value = _TrailDensityRead.SampleLevel(linearClampSampler, uv, 0);
 
-	int idx = id.x + id.y * _Size.x + id.z * _SizeXY;
-
-	float4 value = float4(0, 0, 0, 0);
-
-	value += _TrailDensityRead[idx]; //  0, 0, 0
+	float3 duv = 1.0 / _Size;
 
 	//Mean filter
 
 	if (_DiffuseTrail) {
 
 		//3D
-		value += _TrailDensityRead[max(0, id.x - 1) + max(0, id.y - 1) * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; // -1,-1,-1
-		value += _TrailDensityRead[max(0, id.x - 1) + max(0, id.y - 1) * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; // -1,-1, 0
-		value += _TrailDensityRead[max(0, id.x - 1) + max(0, id.y - 1) * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; // -1,-1,+1
-		value += _TrailDensityRead[max(0, id.x - 1) + id.y * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; // -1, 0,-1
-		value += _TrailDensityRead[max(0, id.x - 1) + id.y * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; // -1, 0, 0
-		value += _TrailDensityRead[max(0, id.x - 1) + id.y * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; // -1, 0,+1
-		value += _TrailDensityRead[max(0, id.x - 1) + min(_Size.y - 1, id.y + 1) * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; // -1,+1,-1
-		value += _TrailDensityRead[max(0, id.x - 1) + min(_Size.y - 1, id.y + 1) * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; // -1,+1, 0
-		value += _TrailDensityRead[max(0, id.x - 1) + min(_Size.y - 1, id.y + 1) * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; // -1,+1,+1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv - duv, 0) * _TrailDiffuseSpeed; // -1,-1,-1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(-duv.x, -duv.y,		0), 0) * _TrailDiffuseSpeed; // -1,-1, 0
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(-duv.x, -duv.y,  duv.z), 0) * _TrailDiffuseSpeed; // -1,-1,+1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(-duv.x,      0, -duv.z), 0) * _TrailDiffuseSpeed; // -1, 0,-1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(-duv.x,		0,		0), 0) * _TrailDiffuseSpeed; // -1, 0, 0
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(-duv.x,		0,  duv.z), 0) * _TrailDiffuseSpeed; // -1, 0,+1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(-duv.x,  duv.y, -duv.z), 0) * _TrailDiffuseSpeed; // -1,+1,-1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(-duv.x,  duv.y,		0), 0) * _TrailDiffuseSpeed; // -1,+1, 0
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(-duv.x,  duv.y,  duv.z), 0) * _TrailDiffuseSpeed; // -1,+1,+1
 
-		value += _TrailDensityRead[id.x + max(0, id.y - 1) * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; //  0,-1,-1
-		value += _TrailDensityRead[id.x + max(0, id.y - 1) * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; //  0,-1, 0
-		value += _TrailDensityRead[id.x + max(0, id.y - 1) * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; //  0,-1,+1
-		value += _TrailDensityRead[id.x + id.y * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; //  0, 0,-1
-		value += _TrailDensityRead[id.x + id.y * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; //  0, 0,+1
-		value += _TrailDensityRead[id.x + min(_Size.y - 1, id.y + 1) * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; //  0,+1,-1
-		value += _TrailDensityRead[id.x + min(_Size.y - 1, id.y + 1) * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; //  0,+1, 0
-		value += _TrailDensityRead[id.x + min(_Size.y - 1, id.y + 1) * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; //  0,+1,+1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(0, -duv.y, -duv.z), 0) * _TrailDiffuseSpeed; //  0,-1,-1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(0, -duv.y,	   0), 0) * _TrailDiffuseSpeed; //  0,-1, 0
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(0, -duv.y,  duv.z), 0) * _TrailDiffuseSpeed; //  0,-1,+1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(0,	   0, -duv.z), 0) * _TrailDiffuseSpeed; //  0, 0,-1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(0,      0,  duv.z), 0) * _TrailDiffuseSpeed; //  0, 0,+1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(0,  duv.y, -duv.z), 0) * _TrailDiffuseSpeed; //  0,+1,-1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(0,  duv.y,      0), 0) * _TrailDiffuseSpeed; //  0,+1, 0
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(0,  duv.y,  duv.z), 0) * _TrailDiffuseSpeed; //  0,+1,+1
 
-		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + max(0, id.y - 1) * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; // +1,-1,-1
-		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + max(0, id.y - 1) * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; // +1,-1, 0
-		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + max(0, id.y - 1) * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; // +1,-1,+1
-		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + id.y * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; // +1, 0,-1
-		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + id.y * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; // +1, 0, 0
-		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + id.y * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; // +1, 0,+1
-		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + min(_Size.y - 1, id.y + 1) * _Size.x + max(0, id.z - 1) * _SizeXY] * _TrailDiffuseSpeed; // +1,+1,-1
-		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + min(_Size.y - 1, id.y + 1) * _Size.x + id.z * _SizeXY] * _TrailDiffuseSpeed; // +1,+1, 0
-		value += _TrailDensityRead[min(_Size.x - 1, id.x + 1) + min(_Size.y - 1, id.y + 1) * _Size.x + min(_Size.z - 1, id.z + 1) * _SizeXY] * _TrailDiffuseSpeed; // +1,+1,+1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(duv.x, -duv.y, -duv.z), 0) * _TrailDiffuseSpeed; // +1,-1,-1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(duv.x, -duv.y,      0), 0) * _TrailDiffuseSpeed; // +1,-1, 0
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(duv.x, -duv.y,  duv.z), 0) * _TrailDiffuseSpeed; // +1,-1,+1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(duv.x,      0, -duv.z), 0) * _TrailDiffuseSpeed; // +1, 0,-1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(duv.x,      0,      0), 0) * _TrailDiffuseSpeed; // +1, 0, 0
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(duv.x,      0,  duv.z), 0) * _TrailDiffuseSpeed; // +1, 0,+1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(duv.x,  duv.y, -duv.z), 0) * _TrailDiffuseSpeed; // +1,+1,-1
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(duv.x,  duv.y,      0), 0) * _TrailDiffuseSpeed; // +1,+1, 0
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + duv, 0) * _TrailDiffuseSpeed; // +1,+1,+1
 
 		value = (value / (1. + 26.*_TrailDiffuseSpeed));
 	}
@@ -297,8 +269,82 @@ void UpdateTrail (uint3 id : SV_DISPATCHTHREADID)
 
 	//value.w = lerp(value.w, 1.0f - meshDist, _MeshImportance);
 
-	_TrailDensityWrite[idx] = value;
+	_TrailDensityWrite[id] = value;
 
+}
+
+[numthreads(NUM_THREADS_3D, NUM_THREADS_3D, NUM_THREADS_3D)]
+void BlurTrailX(uint3 id : SV_DISPATCHTHREADID)
+{
+	float3 uv = (id + float3(0.5, 0.5, 0.5)) / _Size;
+	float4 value = _TrailDensityRead.SampleLevel(linearClampSampler, uv, 0);
+
+	float3 duv = 1.0 / _Size;
+
+	//Mean filter
+
+	if (_DiffuseTrail) {
+
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(-duv.x, 0, 0), 0) * _TrailDiffuseSpeed;
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(duv.x, 0, 0), 0) * _TrailDiffuseSpeed;
+
+		value = (value / (1. + 2. * _TrailDiffuseSpeed));
+	}
+
+	_TrailDensityWrite[id] = value;
+
+}
+
+[numthreads(NUM_THREADS_3D, NUM_THREADS_3D, NUM_THREADS_3D)]
+void BlurTrailY(uint3 id : SV_DISPATCHTHREADID)
+{
+	float3 uv = (id + float3(0.5, 0.5, 0.5)) / _Size;
+	float4 value = _TrailDensityRead.SampleLevel(linearClampSampler, uv, 0);
+
+	float3 duv = 1.0 / _Size;
+
+	//Mean filter
+
+	if (_DiffuseTrail) {
+
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(0, duv.y, 0), 0) * _TrailDiffuseSpeed;
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(0, -duv.y, 0), 0) * _TrailDiffuseSpeed;
+
+		value = (value / (1. + 2. * _TrailDiffuseSpeed));
+	}
+
+	_TrailDensityWrite[id] = value;
+
+}
+
+[numthreads(NUM_THREADS_3D, NUM_THREADS_3D, NUM_THREADS_3D)]
+void BlurTrailZ(uint3 id : SV_DISPATCHTHREADID)
+{
+	float3 uv = (id + float3(0.5, 0.5, 0.5)) / _Size;
+	float4 value = _TrailDensityRead.SampleLevel(linearClampSampler, uv, 0);
+
+	float3 duv = 1.0 / _Size;
+
+	//Mean filter
+
+	if (_DiffuseTrail) {
+
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(0, 0, duv.z), 0) * _TrailDiffuseSpeed;
+		value += _TrailDensityRead.SampleLevel(linearClampSampler, uv + float3(0, 0, -duv.z), 0) * _TrailDiffuseSpeed;
+
+		value = (value / (1. + 2. * _TrailDiffuseSpeed));
+	}
+
+	_TrailDensityWrite[id] = value;
+
+}
+
+[numthreads(NUM_THREADS_3D, NUM_THREADS_3D, NUM_THREADS_3D)]
+void DecayTrail(uint3 id : SV_DISPATCHTHREADID)
+{
+	float4 value = _TrailDensityRead[id];
+	value *= 1.0f - _TrailDecay;
+	_TrailDensityWrite[id] = value;
 }
 
 [numthreads(NUM_THREADS_1D, 1, 1)]

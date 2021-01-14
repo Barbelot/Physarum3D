@@ -9,7 +9,7 @@ public class PhysarumVolumeController : MonoBehaviour
 
     [Header("Initial Values")]
     [SerializeField] private int numberOfParticles = 10000;
-    [SerializeField] private Vector3 size = new Vector3(64, 64, 64);
+    [SerializeField] private Vector3Int size = new Vector3Int(64, 64, 64);
     [SerializeField] private ComputeShader shader;
 	[SerializeField] public RenderTexture particlePositionMap;
 	[SerializeField] public RenderTexture particleColorMap;
@@ -37,9 +37,9 @@ public class PhysarumVolumeController : MonoBehaviour
 
     private Vector2 sensorAngle; 				//in radians
     private Vector2 rotationAngle;            //in radians
-	private int initParticlesKernel, updateParticlesKernel, initTrailKernel, updateTrailKernel, updateParticleMapKernel;
+	private int initParticlesKernel, updateParticlesKernel, initTrailKernel, updateTrailKernel, blurTrailXKernel, blurTrailYKernel, blurTrailZKernel, decayTrailKernel, updateParticleMapKernel;
     private ComputeBuffer particleBuffer;
-	private ComputeBuffer[] trailDensityBuffer;
+	public RenderTexture[] trailDensity;
 	private RenderTexture _tmpParticlePositionMap;
 	private RenderTexture _tmpParticleColorMap;
 	private RenderTexture _tmpParticleVelocityMap;
@@ -80,6 +80,10 @@ public class PhysarumVolumeController : MonoBehaviour
         updateParticlesKernel	= shader.FindKernel("UpdateParticles");
         initTrailKernel			= shader.FindKernel("InitTrail");
 		updateTrailKernel		= shader.FindKernel("UpdateTrail");
+		blurTrailXKernel		= shader.FindKernel("BlurTrailX");
+		blurTrailYKernel		= shader.FindKernel("BlurTrailY");
+		blurTrailZKernel		= shader.FindKernel("BlurTrailZ");
+		decayTrailKernel		= shader.FindKernel("DecayTrail");
 		updateParticleMapKernel	= shader.FindKernel("UpdateParticleMap");
 
 		Initialize();
@@ -104,8 +108,6 @@ public class PhysarumVolumeController : MonoBehaviour
 
 	void OnDestroy() {
 		if (particleBuffer != null) particleBuffer.Release();
-		if (trailDensityBuffer[READ] != null) trailDensityBuffer[READ].Release();
-		if (trailDensityBuffer[WRITE] != null) trailDensityBuffer[WRITE].Release();
 		if (_tmpParticlePositionMap != null) { Destroy(_tmpParticlePositionMap); _tmpParticlePositionMap = null; }
 	}
 
@@ -114,9 +116,25 @@ public class PhysarumVolumeController : MonoBehaviour
 	#region Initialization Functions
 
 	void Initialize() {
+		CreateTrailTextures();
 		InitializeParticles();
 		InitializeTrail();
 		InitializeParticleMap();
+	}
+
+	void CreateTrailTextures() {
+		//Initialize trail Textures
+		trailDensity = new RenderTexture[2];
+		trailDensity[READ] = new RenderTexture(size.x, size.y, 0, RenderTextureFormat.ARGBFloat);
+		trailDensity[READ].dimension = UnityEngine.Rendering.TextureDimension.Tex3D;
+		trailDensity[READ].volumeDepth = size.z;
+		trailDensity[READ].enableRandomWrite = true;
+		trailDensity[READ].Create();
+		trailDensity[WRITE] = new RenderTexture(size.x, size.y, 0, RenderTextureFormat.ARGBFloat);
+		trailDensity[WRITE].dimension = UnityEngine.Rendering.TextureDimension.Tex3D;
+		trailDensity[WRITE].volumeDepth = size.z;
+		trailDensity[WRITE].enableRandomWrite = true;
+		trailDensity[WRITE].Create();
 	}
 
 	void InitializeParticles()
@@ -128,24 +146,31 @@ public class PhysarumVolumeController : MonoBehaviour
         particleBuffer = new ComputeBuffer(particleArray.Length, 13*sizeof(float));
         particleBuffer.SetData(particleArray);
 
-        //initialize particles with random positions
-        shader.SetVector("_Size", size);
+		//initialize particles with random positions
+		shader.SetVector("_Size", new Vector3(size.x, size.y, size.z));
         shader.SetBuffer(initParticlesKernel, "_ParticleBuffer", particleBuffer);
         shader.Dispatch(initParticlesKernel, numberOfParticles / groupCount1D, 1, 1);
 
         shader.SetBuffer(updateParticlesKernel, "_ParticleBuffer", particleBuffer);
-    }
+		shader.SetTexture(updateParticlesKernel, "_TrailDensityRead", trailDensity[READ]);
+		shader.SetTexture(updateParticlesKernel, "_TrailDensityWrite", trailDensity[WRITE]);
+	}
 
 	void InitializeTrail()
     {
-		//Initialize compute buffer
-		trailDensityBuffer = new ComputeBuffer[2];
-		trailDensityBuffer[READ]  = new ComputeBuffer((int)(size.x * size.y * size.z), 4 * sizeof(float));
-		trailDensityBuffer[WRITE] = new ComputeBuffer((int)(size.x * size.y * size.z), 4 * sizeof(float));
 
-		shader.SetBuffer(initTrailKernel, "_TrailDensityWrite", trailDensityBuffer[WRITE]);
+		shader.SetTexture(initTrailKernel, "_TrailDensityWrite", trailDensity[WRITE]);
 
-		shader.Dispatch(initTrailKernel, (int)size.x / groupCount3D, (int)size.y / groupCount3D, (int)size.z / groupCount3D);
+		shader.Dispatch(initTrailKernel, size.x / groupCount3D, size.y / groupCount3D, size.z / groupCount3D);
+
+		shader.SetTexture(blurTrailXKernel, "_TrailDensityRead", trailDensity[READ]);
+		shader.SetTexture(blurTrailXKernel, "_TrailDensityWrite", trailDensity[WRITE]);
+		shader.SetTexture(blurTrailYKernel, "_TrailDensityRead", trailDensity[READ]);
+		shader.SetTexture(blurTrailYKernel, "_TrailDensityWrite", trailDensity[WRITE]);
+		shader.SetTexture(blurTrailZKernel, "_TrailDensityRead", trailDensity[READ]);
+		shader.SetTexture(blurTrailZKernel, "_TrailDensityWrite", trailDensity[WRITE]);
+		shader.SetTexture(decayTrailKernel, "_TrailDensityRead", trailDensity[READ]);
+		shader.SetTexture(decayTrailKernel, "_TrailDensityWrite", trailDensity[WRITE]);
 	}
 
 	void InitializeParticleMap() {
@@ -186,10 +211,8 @@ public class PhysarumVolumeController : MonoBehaviour
 
 	#region Runtime Functions
 
-	void SwapBuffers(ComputeBuffer[] buffer) {
-		ComputeBuffer tmp = buffer[READ];
-		buffer[READ] = buffer[WRITE];
-		buffer[WRITE] = tmp;
+	void SwapTrailTextures() {
+		Graphics.CopyTexture(trailDensity[WRITE], trailDensity[READ]);
 	}
 
 	void UpdateRuntimeParameters()
@@ -217,27 +240,34 @@ public class PhysarumVolumeController : MonoBehaviour
 
     void UpdateParticles()
     {
-		SwapBuffers(trailDensityBuffer);
-
-		shader.SetBuffer(updateParticlesKernel, "_TrailDensityRead", trailDensityBuffer[READ]);
-		shader.SetBuffer(updateParticlesKernel, "_TrailDensityWrite", trailDensityBuffer[WRITE]);
-
 		shader.Dispatch(updateParticlesKernel, numberOfParticles / groupCount1D, 1, 1);
+
+		SwapTrailTextures();
 	}
 
     void UpdateTrail()
     {
-		SwapBuffers(trailDensityBuffer);
 
-		shader.SetBuffer(updateTrailKernel, "_TrailDensityRead", trailDensityBuffer[READ]);
-		shader.SetBuffer(updateTrailKernel, "_TrailDensityWrite", trailDensityBuffer[WRITE]);
 
 		//SDF
 		//shader.SetTexture(updateTrailKernel, "_MeshVoxels", meshToSDF.outputRenderTexture);
 		//shader.SetInt("_MeshSDFResolution", meshToSDF.sdfResolution);
 		//shader.SetFloat("_MeshImportance", meshImportance);
 
-		shader.Dispatch(updateTrailKernel, (int)size.x / groupCount3D, (int)size.y / groupCount3D, (int)size.z / groupCount3D);
+		//shader.Dispatch(updateTrailKernel, size.x / groupCount3D, size.y / groupCount3D, size.z / groupCount3D);
+		//SwapTrailTextures();
+
+		shader.Dispatch(blurTrailXKernel, size.x / groupCount3D, size.y / groupCount3D, size.z / groupCount3D);
+		SwapTrailTextures();
+
+		shader.Dispatch(blurTrailYKernel, size.x / groupCount3D, size.y / groupCount3D, size.z / groupCount3D);
+		SwapTrailTextures();
+
+		shader.Dispatch(blurTrailZKernel, size.x / groupCount3D, size.y / groupCount3D, size.z / groupCount3D);
+		SwapTrailTextures();
+
+		shader.Dispatch(decayTrailKernel, size.x / groupCount3D, size.y / groupCount3D, size.z / groupCount3D);
+		SwapTrailTextures();
 	}
 
 	void UpdateParticleMap() {
