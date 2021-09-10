@@ -6,7 +6,15 @@ Unity implementation of the [Physarum Transport Network](https://www.mitpressjou
 
 ![Result Image](https://benoitarbelot.files.wordpress.com/2020/01/physarum3d.png)
 
-# Setup
+# Disclaimer
+
+This project is a prototype and work in progress. It is not actively maintained and may (or may not) evolve in the future.
+
+# Example project with no setup
+
+https://github.com/miketucker/Physarum3D
+
+# Manual Setup
 
 - Download this repo or clone it inside a folder in your Unity project.
 - Add the PhysarumVolumeController.cs script to an object in your scene.
